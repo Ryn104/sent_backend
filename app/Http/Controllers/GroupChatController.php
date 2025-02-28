@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Events\MessageSent;
+use App\Events\GroupMessage;
 use App\Models\ChatGroup;
 use App\Models\ChatGroupMember;
 use App\Models\ChatMessage;
@@ -15,113 +15,120 @@ class GroupChatController extends Controller
 
 
     public function createGroup(Request $request)
-    {
-        Log::info('Create Group Function Called');
-        Log::info('Request Data:', $request->all());  // Log the incoming request data
+{
+    Log::info('Create Group Function Called');
+    Log::info('Request Data:', $request->all());  // Log the incoming request data
 
-        try {
-            // Validasi input
-            $validatedData = $request->validate([
-                'name' => 'required|string|max:255',
-                'members' => 'required|array|min:2', // Ensure members is an array
-                'members.*' => 'integer', // Validate that each member is an integer
-            ]);
+    try {
+        // Validate input
+        $validatedData = $request->validate([
+            'name' => 'required|string|max:255',
+            'members' => 'required|array|min:2', // Ensure members is an array
+            'members.*' => 'integer', // Validate that each member is an integer
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048', // Validate the image file
+        ]);
 
-            // Ensure members is an array, in case it's sent as a JSON string
-            $members = is_array($validatedData['members']) ? $validatedData['members'] : json_decode($validatedData['members']);
+        // Ensure members is an array, in case it's sent as a JSON string
+        $members = is_array($validatedData['members']) ? $validatedData['members'] : json_decode($validatedData['members']);
 
-            Log::info('Validated Data:', $validatedData);
+        Log::info('Validated Data:', $validatedData);
 
-            // Buat grup chat baru
-            $group = ChatGroup::create([
-                'name' => $validatedData['name'],
-                'created_by' => Auth::id(),
-            ]);
+        // Handle image upload
+        $imagePath = null;
+        if ($request->hasFile('image')) {
+            $image = $request->file('image');
+            $imageName = time() . '_' . $image->getClientOriginalName(); // Unique image name
+            $imagePath = $image->storeAs('group_images/', $imageName, 'public'); // Save to public storage
+        }
 
-            Log::info('Group Created:', $group->toArray());
+        // Create a new chat group
+        $group = ChatGroup::create([
+            'name' => $validatedData['name'],
+            'created_by' => Auth::id(),
+            'img' => $imagePath, // Save the image path to the database
+        ]);
 
-            // Tambahkan pembuat grup sebagai anggota
+        Log::info('Group Created:', $group->toArray());
+
+        // Add the group creator as a member
+        ChatGroupMember::create([
+            'group_id' => $group->id,
+            'user_id' => Auth::id(),
+        ]);
+
+        Log::info('Group Creator Added as Member:', ['user_id' => Auth::id()]);
+
+        // Add other members to the group
+        foreach ($members as $memberId) {
             ChatGroupMember::create([
                 'group_id' => $group->id,
-                'user_id' => Auth::id(),
+                'user_id' => $memberId,
             ]);
 
-            Log::info('Group Creator Added as Member:', ['user_id' => Auth::id()]);
-
-            // Tambahkan anggota lain ke dalam grup
-            foreach ($members as $memberId) {
-                ChatGroupMember::create([
-                    'group_id' => $group->id,
-                    'user_id' => $memberId,
-                ]);
-
-                Log::info('Member Added to Group:', ['user_id' => $memberId]);
-            }
-
-            Log::info('Group Creation Process Completed');
-
-            return response()->json([
-                'message' => 'Group created successfully',
-                'group' => $group,
-            ]);
-        } catch (\Exception $e) {
-            // Catat error ke log
-            Log::error('Error in createGroup:', ['error' => $e->getMessage()]);
-
-            // Kembalikan respons error
-            return response()->json([
-                'message' => 'An error occurred',
-                'error' => $e->getMessage(),
-            ], 500);
+            Log::info('Member Added to Group:', ['user_id' => $memberId]);
         }
-    }
 
+        Log::info('Group Creation Process Completed');
 
-    public function sendGroupMessage(Request $request)
-    {
-        if (!Auth::check()) {
-            return response()->json(['error' => 'Unauthorized'], 401);
-        }
-    
-        // Validate the request
-        $validatedData = $request->validate([
-            'group_id' => 'required|exists:chat_groups,id',  // Ensure the group exists
-            'message_text' => 'required|string|max:1000',    // Ensure the message text is valid
-        ]);
-    
-        // Find the group by the validated group_id
-        $group = ChatGroup::find($validatedData['group_id']);
-    
-        // Check if the user is a member of the group
-        $isMember = ChatGroupMember::where('group_id', $group->id)
-            ->where('user_id', Auth::id())
-            ->exists();
-    
-        if (!$isMember) {
-            return response()->json(['error' => 'You are not a member of this group'], 403);
-        }
-    
-        // Create and save the message associated with the group and sender
-        $chat = ChatMessage::create([
-            'sender_id' => Auth::id(),         // The user sending the message
-            'group_id' => $group->id,          // The group where the message is being sent
-            'message_text' => $validatedData['message_text'], // The message content
-        ]);
-    
-        // Retrieve the user's name
-        $user = Auth::user(); // Get the authenticated user
-    
-        // Optionally broadcast the message (real-time functionality)
-        event(new MessageSent($chat));
-    
         return response()->json([
-            'message' => 'Message sent successfully',
-            'data' => [
-                'chat' => $chat,
-                'user_name' => $user->name, // Include the user's name in the response
-            ]
+            'message' => 'Group created successfully',
+            'group' => $group,
         ]);
+    } catch (\Exception $e) {
+        // Log the error
+        Log::error('Error in createGroup:', ['error' => $e->getMessage()]);
+
+        // Return an error response
+        return response()->json([
+            'message' => 'An error occurred',
+            'error' => $e->getMessage(),
+        ], 500);
     }
+}
+
+
+public function sendGroupMessage(Request $request)
+{
+    if (!Auth::check()) {
+        return response()->json(['error' => 'Unauthorized'], 401);
+    }
+
+    $validatedData = $request->validate([
+        'group_id' => 'required|exists:chat_groups,id',
+        'message_text' => 'required|string|max:1000',
+    ]);
+
+    $group = ChatGroup::find($validatedData['group_id']);
+
+    $isMember = ChatGroupMember::where('group_id', $group->id)
+        ->where('user_id', Auth::id())
+        ->exists();
+
+    if (!$isMember) {
+        return response()->json(['error' => 'You are not a member of this group'], 403);
+    }
+
+    $chat = ChatMessage::create([
+        'sender_id' => Auth::id(),
+        'group_id' => $group->id,
+        'message_text' => $validatedData['message_text'],
+    ]);
+
+    $user = Auth::user();
+
+    Log::info("Mengirim event GroupMessage untuk grup ID: " . $group->id);
+    event(new GroupMessage($chat));
+    Log::info("Event berhasil dikirim");
+    
+
+    return response()->json([
+        'message' => 'Message sent successfully',
+        'data' => [
+            'chat' => $chat,
+            'user_name' => $user->name,
+        ]
+    ]);
+}
 
 
     public function getGroupMessages($groupId)
@@ -165,7 +172,7 @@ class GroupChatController extends Controller
 
             return [
                 'group_id' => $group->id,
-                'img' => $group->img,
+                'img' => asset('storage/' . $group->img),
                 'name' => $group->name,
                 'description' => $group->description,
                 'last_message' => $lastMessage ? $lastMessage->message_text : null,
